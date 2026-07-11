@@ -106,9 +106,28 @@ class Miner(BaseMinerNeuron):
         self.batch_rank_span = min(
             0.98, max(0.10, float(os.getenv("POKER44_BATCH_RANK_SPAN", "0.8") or 0.8))
         )
+        # Mode "fraction": single linear band, target_fraction crosses 0.5.
+        # Mode "flag_frac": two bands -- only the top target_fraction is placed
+        # just above the threshold ([0.501, 0.549]) and everything else spreads
+        # over [0.05, 0.49]. Still fully rank-preserving (AP/recall@FPR
+        # unchanged), but caps the hard-FPR@0.5 exposure at the flag budget:
+        # the reward's human_safety/calibration terms survive even when live
+        # within-batch ordering is weak, and the no-TP hard-zero needs EVERY
+        # flag to be human. Preferred under the 0.1.34+ reward when live
+        # ranking quality is uncertain.
+        self.batch_rank_mode = (
+            os.getenv("POKER44_BATCH_RANK_MODE", "fraction").strip().lower()
+        )
+        if self.batch_rank_mode not in {"fraction", "flag_frac"}:
+            bt.logging.warning(
+                f"Unknown POKER44_BATCH_RANK_MODE={self.batch_rank_mode!r}; "
+                "falling back to 'fraction'."
+            )
+            self.batch_rank_mode = "fraction"
         if self.batch_rank_enabled:
             bt.logging.info(
                 "Batch-rank remap ENABLED (model-external, true-rank) | "
+                f"mode={self.batch_rank_mode} "
                 f"target_fraction={self.batch_rank_target_fraction} "
                 f"span={self.batch_rank_span} "
                 "(rank-preserving: AP/recall unchanged; sets the 0.5 crossing)"
@@ -613,17 +632,44 @@ class Miner(BaseMinerNeuron):
     def _apply_batch_rank(self, scores: List[float]) -> List[float]:
         """True-rank per-batch remap of one validator batch's scores.
 
-        Maps each chunk to its within-batch rank in [0,1] (argsort-of-argsort),
-        then into a band so exactly the top ``target_fraction`` cross 0.5 every
-        batch. Rank-based -> preserves the model's ordering (AP and recall@FPR
-        are unchanged) and is immune to score scale (works identically across
-        models). Per-batch stable, unlike a fixed absolute threshold.
+        Maps each chunk to its within-batch rank (argsort-of-argsort), then
+        into output bands. Rank-based -> preserves the model's ordering (AP
+        and recall@FPR are unchanged) and is immune to score scale (works
+        identically across models). Per-batch stable, unlike a fixed absolute
+        threshold.
+
+        Mode "fraction": one linear band; exactly the top ``target_fraction``
+        crosses 0.5. Aggressive: hard FPR@0.5 equals the human share of the
+        top fraction, which explodes when live ordering is weak.
+
+        Mode "flag_frac": only the top ``target_fraction`` is placed just
+        above the threshold ([0.501, 0.549]); the rest spreads over
+        [0.05, 0.49]. Caps hard-FPR@0.5 exposure at the flag budget and makes
+        the no-TP hard-zero require every flag to be human.
         """
         n = len(scores)
         if n <= 1:
             return scores
-        # stable true rank in [0,1]: sort indices by (score, index), position=rank
+        # stable true rank: sort indices by (score, index)
         order = sorted(range(n), key=lambda i: (scores[i], i))
+
+        if self.batch_rank_mode == "flag_frac":
+            import math as _math
+
+            frac = self.batch_rank_target_fraction
+            k = min(n, max(1, int(_math.ceil(frac * n))))
+            out = [0.0] * n
+            flagged = order[n - k:]        # ascending -> last k are the top k
+            rest = order[: n - k]
+            for pos, i in enumerate(flagged):
+                t = pos / (k - 1) if k > 1 else 1.0
+                out[i] = 0.501 + t * (0.549 - 0.501)
+            m = len(rest)
+            for pos, i in enumerate(rest):
+                t = pos / (m - 1) if m > 1 else 1.0
+                out[i] = 0.05 + t * (0.49 - 0.05)
+            return [self._clamp01(v) for v in out]
+
         rank = [0.0] * n
         for pos, i in enumerate(order):
             rank[i] = pos / (n - 1)
