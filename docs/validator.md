@@ -40,8 +40,6 @@ the validator.
 
 ## What the Validator Actually Sends to Miners
 
-Current validator behavior is important to understand precisely.
-
 The validator fetches `batches` from the central eval API. Each returned batch currently looks like:
 
 - one hidden label (`is_human`) on the validator side only;
@@ -60,12 +58,8 @@ Where:
 - miners return one score per chunk.
 
 So the current production path is **not** “one label for the entire epoch payload”.
-Instead:
-
-- the active eval payload contains many labeled batches;
-- the validator scores miners batch-by-batch;
-- each individual batch/chunk is homogeneous, so the hands inside it are all human or all bot;
-- each batch/chunk remains one scoring unit from the validator’s point of view.
+Instead, the validator scores miners chunk-by-chunk, with each chunk treated as
+one scoring unit.
 
 Relevant code:
 
@@ -76,15 +70,10 @@ Relevant code:
 
 ## Where the Eval Data Comes From
 
-The current production source is:
-
-1. live benchmark tables run on Poker44 platform infrastructure;
-2. those tables contain both human and bot seats;
-3. all hands are persisted to platform SQL;
-4. `poker44-platform-backend` builds evaluation batches from those benchmark-table hands;
-5. if `requireMixed=true`, only source hands that include both human and bot participation are eligible;
-6. the backend publishes an active canonical chunk for the epoch/window;
-7. validators read that active chunk through `/internal/eval/current`.
+The current production source is centralized platform infrastructure. In broad
+terms, live gameplay data is persisted by the platform runtime, transformed into
+canonical evaluation material by the backend, and then consumed by validators
+through the eval API.
 
 ## Observability And Competition Signals
 
@@ -100,36 +89,33 @@ platform can expose:
 - live network/miner state from validator-signed metagraph snapshots;
 - a daily competition surface built on top of the canonical eval feed.
 
-The intended competition model is:
+The intended competition model is time-based and continuously evaluated, with
+public leaderboard surfaces derived from signed validator and network state.
 
-- daily epoch (20:00 UTC to 20:00 UTC);
-- canonical eval windows of 2 hours inside that daily epoch;
-- continuous evaluation on canonical live hands during the epoch;
-- public provisional leaderboard during the day;
-- winner-take-all settlement after the epoch closes.
+At the current production cadence:
+
+- competition epochs run for `120h`, anchored at the active cycle close;
+- canonical eval chunks are managed in daily `24h` windows inside that epoch;
+- the latest fully settled competition winner remains the canonical competition reference until the next settlement closes.
 
 Settlement behavior now follows a platform-decided pattern:
 
 - validators fetch the canonical competition vector from
   `/internal/competition/current/weights`;
-- once the backend has settled at least one daily winner, the latest settled
+- once the backend has settled at least one competition winner, the latest settled
   winner becomes the canonical competition vector for the current/vigente
   period, but validators apply a Swarm-style burn on top of it:
-  `97%` to `uid 0`, `3%` to the backend-provided winner vector;
-- before the first daily settlement exists, the backend returns its explicit
+  `0%` to `uid 0`, `100%` to the backend-provided winner vector;
+- before the first settlement exists, the backend returns its explicit
   fallback vector (typically `uid 0`, which remains `100%` burned);
 - validators only fall back to local score-based weights if the backend is
   unavailable or returns no usable positive vector.
 
 Important nuance:
 
-- source hands come from live benchmark tables;
-- the backend rotates the active canonical chunk on 2-hour windows;
-- validators poll that runtime continuously (`POKER44_POLL_INTERVAL_SECONDS`,
-  300s by default) and can score the active window multiple times before the
-  next window opens;
-- the published payload can contain both human-labeled and bot-labeled batches;
-- each delivered batch/chunk is still one scoring unit from the validator’s point of view.
+- validators poll the runtime continuously;
+- the active canonical chunk can be refreshed over time;
+- each delivered chunk remains one scoring unit from the validator’s point of view.
 
 ## Pull + Restart Contract
 
@@ -215,15 +201,17 @@ Optional observability/reporting:
 - `POKER44_VALIDATOR_RUNTIME_REPORT_URL`
 - `POKER44_VALIDATOR_NETWORK_SNAPSHOT_REPORT_URL`
 
-Important defaults in the current script:
+Optional audit lane:
 
-- `POKER44_CHUNK_COUNT=80`
-- `POKER44_REWARD_WINDOW=40`
-- `POKER44_POLL_INTERVAL_SECONDS=300`
-- `POKER44_MINERS_PER_CYCLE=16`
-- `POKER44_PROVIDER_MIN_EVAL_HANDS=40`
-- `POKER44_PROVIDER_MAX_EVAL_HANDS=70`
-- `POKER44_PROVIDER_ATTEMPT_PUBLISH_CURRENT=true`
+- `POKER44_AUDIT_PROVIDER=none|verathos`
+- `POKER44_AUDIT_MODE=shadow|disabled`
+- `POKER44_AUDIT_TOP_ROWS=8`
+- `POKER44_AUDIT_RECENT_REPORT_LIMIT=32`
+- `POKER44_VERATHOS_API_KEY`
+- `POKER44_VERATHOS_MODEL`
+- `POKER44_VERATHOS_BASE_URL=https://api.verathos.ai/v1`
+- `POKER44_VERATHOS_TIMEOUT_SECONDS=20`
+- `POKER44_AUDIT_PUBLIC_KEY_PEM` (optional override; defaults to the embedded Poker44 public key)
 
 Notes:
 
@@ -232,9 +220,38 @@ Notes:
   `/internal/eval/publish-current`;
 - validator-facing eval reads and score reporting can run with signed hotkey auth
   when the backend is configured for validator access;
-- `POKER44_CHUNK_COUNT` controls how many batches/chunks the validator will forward to miners in
-  one cycle;
 - each batch/chunk may contain one or many hands.
+
+## Audit Lane
+
+Validators now support a best-effort audit lane alongside the main scoring path.
+
+Current behavior:
+
+- the main miner-scoring flow remains unchanged;
+- each completed evaluation cycle can produce:
+  - `audit_reports.json.enc` with the full audit record encrypted for Poker44;
+  - `audit_reports.summary.json` with only non-sensitive local summary fields;
+- when `POKER44_AUDIT_PROVIDER=none`, the validator still records an encrypted local audit trail with:
+  - epoch/chunk identifiers,
+  - dataset hash,
+  - top competition rows,
+  - validator/runtime context,
+  - integrity/compliance summaries;
+- when `POKER44_AUDIT_PROVIDER=verathos` and Verathos credentials are configured,
+  the validator also performs a shadow external audit call and stores the returned
+  verification metadata and structured summary.
+
+This audit lane is intentionally best-effort:
+
+- audit failures do not block miner scoring;
+- provider failures are recorded but do not interrupt the validator cycle;
+- runtime snapshots now include the latest audit summary so the platform can expose
+  audit status separately from reward computation.
+
+The encrypted artifact is written with Poker44's audit public key by default, so a
+validator operator can store it locally but cannot decrypt the full report from the
+node without the corresponding private key held by Poker44.
 
 ## Run Validator
 
