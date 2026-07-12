@@ -132,6 +132,26 @@ class Miner(BaseMinerNeuron):
                 f"span={self.batch_rank_span} "
                 "(rank-preserving: AP/recall unchanged; sets the 0.5 crossing)"
             )
+        # Sub-chunk TTA (opt-in, default OFF via POKER44_TTA): live validator
+        # chunks carry 80-100 hands while every training chunk has 30-40, so
+        # chunk-level aggregate features drift out of distribution at serve
+        # time. With TTA each incoming chunk is scored as overlapping
+        # training-sized windows and the per-window scores are aggregated
+        # (median), keeping the model's inputs in-distribution without
+        # retraining. Chunks no longer than one window are scored as-is, so
+        # benchmark-sized inputs are bit-identical with TTA on or off.
+        self.tta_enabled = (
+            os.getenv("POKER44_TTA", "0").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
+        self.tta_window = max(8, int(os.getenv("POKER44_TTA_WINDOW", "40")))
+        self.tta_stride = max(1, int(os.getenv("POKER44_TTA_STRIDE", "20")))
+        if self.tta_enabled:
+            bt.logging.info(
+                "Sub-chunk TTA ENABLED | "
+                f"window={self.tta_window} stride={self.tta_stride} agg=median "
+                "(long live chunks are scored as training-sized windows)"
+            )
         self.model_path = Path(
             os.getenv(
                 "POKER44_MODEL_PATH",
@@ -629,6 +649,38 @@ class Miner(BaseMinerNeuron):
 
         return round(cls._clamp01(avg_score + consistency_bonus), 6)
 
+    def _tta_windows(self, chunk: list) -> list:
+        """Overlapping training-sized windows covering the whole chunk."""
+        n = len(chunk)
+        w = self.tta_window
+        if n <= w:
+            return [chunk]
+        starts = list(range(0, n - w + 1, self.tta_stride))
+        if starts[-1] != n - w:
+            starts.append(n - w)
+        return [chunk[start:start + w] for start in starts]
+
+    def _predict_with_tta(self, chunks: list) -> List[float]:
+        """Score every window of every chunk in one batched call, then take
+        the per-chunk median. Median keeps the 0.5-crossing semantics sane
+        (median >= 0.5 iff a majority of windows agree)."""
+        from statistics import median
+
+        windows: list = []
+        owner: List[int] = []
+        for chunk_index, chunk in enumerate(chunks):
+            chunk_windows = self._tta_windows(chunk)
+            windows.extend(chunk_windows)
+            owner.extend([chunk_index] * len(chunk_windows))
+        flat_scores = self.predictor.predict_chunk_scores(windows)
+        per_chunk: List[List[float]] = [[] for _ in chunks]
+        for chunk_index, score in zip(owner, flat_scores):
+            per_chunk[chunk_index].append(float(score))
+        return [
+            round(median(values), 6) if values else 0.5
+            for values in per_chunk
+        ]
+
     def _apply_batch_rank(self, scores: List[float]) -> List[float]:
         """True-rank per-batch remap of one validator batch's scores.
 
@@ -705,9 +757,15 @@ class Miner(BaseMinerNeuron):
                 # requests. Running it inline blocks the loop for the whole batch,
                 # which ages incoming nonces past the verification window
                 # (NotVerifiedException: "Nonce is too old") under large snapshots.
-                scores = await asyncio.to_thread(
-                    self.predictor.predict_chunk_scores, chunks
-                )
+                if self.tta_enabled:
+                    scores = await asyncio.to_thread(
+                        self._predict_with_tta, chunks
+                    )
+                    backend_used = f"{self.backend}+tta"
+                else:
+                    scores = await asyncio.to_thread(
+                        self.predictor.predict_chunk_scores, chunks
+                    )
             except Exception as err:
                 bt.logging.warning(
                     f"Predictor failure during chunk scoring: {err}. "
