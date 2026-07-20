@@ -167,7 +167,7 @@ MIT — see [`LICENSE`](LICENSE).
 
 ## Operations
 
-See `docs/operations.md` for the runbook and `scripts/miner_healthcheck.sh` for a quick health snapshot.
+See `docs/operations.md` for the runbook, `scripts/miner_healthcheck.sh` for a quick single-process health snapshot, and `scripts/fleet_status.sh` for a fleet-wide roll-up when multiple hotkeys share a host.
 
 ---
 

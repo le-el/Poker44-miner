@@ -16,3 +16,10 @@
 ## Latency
 Validator-side scoring tolerates slow responses up to the network timeout;
 prefer correctness and stable memory usage over micro-optimizing latency.
+
+## Fleet status
+When several hotkeys run on one host, `scripts/fleet_status.sh [name-filter]`
+rolls up every pm2 process into one view: status, uptime, restart count, and
+the most recent `Scored` line per process. A process that is `online` but has
+no recent scoring line is the classic signature of an axon-reachability
+problem rather than a crash — cross-check with the redeploy checklist above.
