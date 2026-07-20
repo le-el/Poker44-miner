@@ -168,3 +168,7 @@ MIT — see [`LICENSE`](LICENSE).
 ## Operations
 
 See `docs/operations.md` for the runbook and `scripts/miner_healthcheck.sh` for a quick health snapshot.
+
+---
+
+**Model version:** `10.0`
