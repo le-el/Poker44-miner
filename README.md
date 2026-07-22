@@ -172,3 +172,16 @@ See `docs/operations.md` for the runbook, `scripts/miner_healthcheck.sh` for a q
 ---
 
 **Model version:** `10.0`
+
+## Model Metadata
+
+| field | value |
+|---|---|
+| model name | `handguard-v4` |
+| model version | `10.0` |
+| approach | hero-vs-table contrast features + stacked gradient-boosted trees |
+
+The detector scores the HERO seat by contrasting its behavior against the
+other seats at the same table (aggression frequency, fold-to-pressure, bet
+sizing) and feeding those contrast features to a stacked GBM ensemble; see
+`poker44_ml/` for the feature implementation lineage.
